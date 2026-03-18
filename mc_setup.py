@@ -673,6 +673,47 @@ def find_client_pack(files: list):
         return sorted(pool, key=lambda f: f.get("fileDate", ""), reverse=True)[0]
     return None
 
+META_FILE = ".mc_installer_meta.json"
+
+def load_install_meta(install_dir: Path) -> dict:
+    meta_path = install_dir / META_FILE
+    if meta_path.exists():
+        try:
+            return json.loads(meta_path.read_text())
+        except Exception:
+            pass
+    return {}
+
+def save_install_meta(install_dir: Path, slug: str, mod_name: str, file_id: int, file_date: str):
+    meta = {"slug": slug, "name": mod_name, "file_id": file_id, "file_date": file_date}
+    (install_dir / META_FILE).write_text(json.dumps(meta, indent=2))
+
+def check_existing_modpack(install_dir: Path, slug: str, files: list) -> bool:
+    """
+    Returns True if the modpack is already installed and up to date
+    (caller should skip the download). Returns False if install should proceed.
+    """
+    meta = load_install_meta(install_dir)
+    if not meta or meta.get("slug") != slug:
+        return False
+
+    installed_id = meta.get("file_id")
+    server_file  = find_server_pack(files)
+    latest       = server_file or find_client_pack(files)
+    latest_id    = latest.get("id") if latest else None
+
+    if installed_id and latest_id and installed_id == latest_id:
+        ok(f"Modpack already installed and up to date ({meta.get('name')}).")
+        return True
+
+    if installed_id and latest_id and installed_id != latest_id:
+        warn(f"A newer version of {meta.get('name')} is available.")
+        return not ask_yn("Update to the latest version?", "y")
+
+    # Meta exists but can't compare versions — ask
+    warn("This directory already has a modpack installation.")
+    return not ask_yn("Re-install / overwrite?", "n")
+
 def run_forge_installer(java_path: str, install_dir: Path, installer_jar: Path) -> Path:
     """Run the Forge --installServer and return the path to win_args.txt."""
     info("Running Forge installer (this may take a minute)...")
@@ -693,6 +734,8 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
     Download and set up the modpack server.
     Returns ("forge", win_args_path) or ("jar", jar_name).
     """
+    slug       = mod_info.get("slug", "")
+    mod_name   = mod_info.get("name", "")
     cf_headers = {"x-api-key": api_key}
 
     # ── Try the dedicated server pack first ───────────────────────────────────
@@ -844,25 +887,16 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
 
 # ── Gonger Certified banner ───────────────────────────────────────────────────
 def print_gonger_banner():
-    G    = c(" G ", "yellow")
-    cert = c("Gonger Certified", "yellow")
-    star = c("*", "yellow")
-    hat  = c("   /\\  ", "cyan")
-    face = c("  (o o)", "cyan")
-    body = c("   | |  ", "cyan")
-    base = c("  /\\_/\\ ", "cyan")
-    wand = c("~*~*~*~*~*~*~*~*~*~*~*~>", "cyan")
-    box_tl = c("╔═══════════╗", "yellow")
-    box_ml = c("║", "yellow")
-    box_mr = c("║", "yellow")
-    box_bl = c("╚═══════════╝", "yellow")
-    print(f"""
-  {hat}
-  {face}  {wand}  {box_tl}
-  {body}\\                        {box_ml}   {G}   {box_mr}
-  {base}                         {box_ml}  {cert}  {box_mr}
-                                {box_bl}
-""")
+    y  = lambda t: "\033[93m" + t + "\033[0m"
+    cy = lambda t: "\033[96m" + t + "\033[0m"
+    sp = "           "  # 11 spaces — aligns box with wizard width
+    print()
+    print("  " + cy("    *      "))
+    print("  " + cy("   /|\\    ") + sp + y("╔════════════════════╗"))
+    print("  " + cy("  (o o)  ") + cy(" ~~~*~~~~>") + " " + y("║      \u2726   G   \u2726     \u2551"))
+    print("  " + cy("   | |    ") + sp + y("║  GONGER CERTIFIED  ║"))
+    print("  " + cy("  /\\_/\\  ") + sp + y("╚════════════════════╝"))
+    print()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1169,14 +1203,34 @@ def main():
     java_path = ensure_java(install_dir)
 
     if is_modpack:
-        # ── Modpack install ───────────────────────────────────────────────────
-        header(f"Downloading {modpack_name}")
-        start_mode, result = install_modpack_server(
-            mod_info, files, cf_api_key, install_dir, java_path)
-        if start_mode == "forge":
-            win_args = result
+        # ── Check if already installed ────────────────────────────────────────
+        if check_existing_modpack(install_dir, parse_modpack_slug(raw_url), files):
+            # Already up to date — figure out start mode from what's on disk
+            win_args_list = list(install_dir.rglob("win_args.txt"))
+            if win_args_list:
+                start_mode = "forge"
+                win_args   = win_args_list[0]
+            else:
+                for candidate in ["server.jar", "minecraft_server.jar", "paper.jar"]:
+                    if (install_dir / candidate).exists():
+                        start_mode = "jar"
+                        jar_name   = candidate
+                        break
         else:
-            jar_name = result
+            # ── Modpack install ───────────────────────────────────────────────
+            header(f"Downloading {modpack_name}")
+            start_mode, result = install_modpack_server(
+                mod_info, files, cf_api_key, install_dir, java_path)
+            if start_mode == "forge":
+                win_args = result
+            else:
+                jar_name = result
+            # Save install metadata so we can skip re-download next time
+            ref_file = find_server_pack(files) or find_client_pack(files)
+            if ref_file:
+                save_install_meta(install_dir, parse_modpack_slug(raw_url),
+                                  modpack_name, ref_file.get("id", 0),
+                                  ref_file.get("fileDate", ""))
 
     elif server_type == "vanilla":
         info("Fetching vanilla server URL...")
