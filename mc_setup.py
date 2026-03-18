@@ -1,5 +1,5 @@
 """
-Minecraft Server Installer  v1.5
+Minecraft Server Installer  v1.6
 Supports: Modpack (CurseForge), Vanilla, Paper (plugins), Fabric (mods)
 Mod sources: Modrinth slugs, Modrinth URLs, CurseForge URLs, modlist.txt file
 """
@@ -394,6 +394,10 @@ def setup_playit(install_dir: Path) -> Path:
 
 # ── server.properties ────────────────────────────────────────────────────────
 def build_server_properties(config: dict) -> str:
+    # Modpacks frequently use command blocks for custom mechanics (generation,
+    # events, dimension logic). Enable them for modpack servers; keep off for
+    # vanilla/Paper/Fabric where they're a security concern.
+    cmd_blocks = "true" if config.get("is_modpack") else "false"
     lines = [
         "# Minecraft server properties",
         f"motd={config['motd']}",
@@ -409,7 +413,7 @@ def build_server_properties(config: dict) -> str:
         "view-distance=10",
         "simulation-distance=8",
         "sync-chunk-writes=true",
-        "enable-command-block=false",
+        f"enable-command-block={cmd_blocks}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1144,7 +1148,7 @@ def main():
   ██║╚██╔╝██║██║██║╚██╗██║██╔══╝  ██║     ██╔══██╗██╔══██║██╔══╝     ██║
   ██║ ╚═╝ ██║██║██║ ╚████║███████╗╚██████╗██║  ██║██║  ██║██║        ██║
   ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝        ╚═╝
-  SERVER INSTALLER  v1.5
+  SERVER INSTALLER  v1.6
 """, "green"))
     print_gonger_banner()
 
@@ -1508,7 +1512,8 @@ def main():
     ok("EULA accepted.")
 
     cfg_props = dict(motd=motd, max_players=max_players, port=port, difficulty=difficulty,
-                     gamemode=gamemode, world_name=world_name, online_mode=online_mode, whitelist=whitelist)
+                     gamemode=gamemode, world_name=world_name, online_mode=online_mode,
+                     whitelist=whitelist, is_modpack=is_modpack)
     (install_dir / "server.properties").write_text(build_server_properties(cfg_props))
     ok("server.properties written.")
 
