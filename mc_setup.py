@@ -1,5 +1,5 @@
 """
-Minecraft Server Installer  v1.6
+Minecraft Server Installer  v1.7
 Supports: Modpack (CurseForge), Vanilla, Paper (plugins), Fabric (mods)
 Mod sources: Modrinth slugs, Modrinth URLs, CurseForge URLs, modlist.txt file
 """
@@ -397,7 +397,9 @@ def build_server_properties(config: dict) -> str:
     # Modpacks frequently use command blocks for custom mechanics (generation,
     # events, dimension logic). Enable them for modpack servers; keep off for
     # vanilla/Paper/Fabric where they're a security concern.
-    cmd_blocks = "true" if config.get("is_modpack") else "false"
+    # Modpacks need command blocks (procedural generation, events) and flight
+    # allowed (custom spawn sequences often leave players briefly airborne).
+    modpack_flag = "true" if config.get("is_modpack") else "false"
     lines = [
         "# Minecraft server properties",
         f"motd={config['motd']}",
@@ -413,7 +415,8 @@ def build_server_properties(config: dict) -> str:
         "view-distance=10",
         "simulation-distance=8",
         "sync-chunk-writes=true",
-        f"enable-command-block={cmd_blocks}",
+        f"enable-command-block={modpack_flag}",
+        f"allow-flight={modpack_flag}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1148,7 +1151,7 @@ def main():
   ██║╚██╔╝██║██║██║╚██╗██║██╔══╝  ██║     ██╔══██╗██╔══██║██╔══╝     ██║
   ██║ ╚═╝ ██║██║██║ ╚████║███████╗╚██████╗██║  ██║██║  ██║██║        ██║
   ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝        ╚═╝
-  SERVER INSTALLER  v1.6
+  SERVER INSTALLER  v1.7
 """, "green"))
     print_gonger_banner()
 
