@@ -714,16 +714,50 @@ def check_existing_modpack(install_dir: Path, slug: str, files: list) -> bool:
     warn("This directory already has a modpack installation.")
     return not ask_yn("Re-install / overwrite?", "n")
 
-def fetch_forge_version(mc_version: str) -> str:
-    """Return the recommended (or latest) Forge version for a given MC version."""
+def fetch_forge_version(mc_version: str, min_version: str = "") -> str:
+    """
+    Return the best Forge version for a given MC version.
+    If min_version is set (e.g. '47.4.13'), ensures the returned version is >= that.
+    Falls back to the Forge Maven listing to find a version that satisfies the minimum.
+    """
     try:
         data = _get_json("https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json")
         promos = data.get("promos", {})
-        return (promos.get(f"{mc_version}-recommended")
-                or promos.get(f"{mc_version}-latest")
-                or "")
+        recommended = (promos.get(f"{mc_version}-recommended")
+                       or promos.get(f"{mc_version}-latest")
+                       or "")
+
+        def ver_tuple(v):
+            try:
+                return tuple(int(x) for x in v.split("."))
+            except Exception:
+                return (0,)
+
+        if min_version and recommended:
+            if ver_tuple(recommended) >= ver_tuple(min_version):
+                return recommended
+            # Recommended is too old — fetch full version list from Maven metadata
+            info(f"Promotions version ({recommended}) is older than required ({min_version}). Checking Maven...")
+            try:
+                meta_url = (f"https://maven.minecraftforge.net/net/minecraftforge/forge/"
+                            f"maven-metadata.xml")
+                req = urllib.request.Request(meta_url, headers={"User-Agent": "mc-installer/1.3"})
+                xml = urllib.request.urlopen(req, context=_SSL_CTX).read().decode()
+                versions = re.findall(rf"{re.escape(mc_version)}-(\d+\.\d+\.\d+)", xml)
+                candidates = [v for v in versions if ver_tuple(v) >= ver_tuple(min_version)]
+                if candidates:
+                    best = sorted(candidates, key=ver_tuple)[-1]
+                    ok(f"Using Forge {best} (satisfies >= {min_version})")
+                    return best
+            except Exception as e:
+                warn(f"Could not fetch Maven metadata: {e}")
+            # Last resort: just use the minimum directly
+            ok(f"Using minimum required Forge version {min_version}")
+            return min_version
+
+        return recommended
     except Exception:
-        return ""
+        return min_version or ""
 
 def download_and_run_forge(java_path: str, install_dir: Path, mc_version: str, forge_version: str) -> Path:
     """Download Forge installer, run --installServer, return win_args.txt path."""
@@ -737,6 +771,34 @@ def download_and_run_forge(java_path: str, install_dir: Path, mc_version: str, f
     win_args = run_forge_installer(java_path, install_dir, installer_jar)
     installer_jar.unlink(missing_ok=True)
     return win_args
+
+def _detect_min_forge_from_mods(mods_dir: Path) -> str:
+    """
+    Scan mod jars for mods.toml and extract the highest minimum Forge version
+    any mod requires (e.g. '[47.4.13,)' → '47.4.13').
+    Returns empty string if nothing found.
+    """
+    min_ver = (0, 0, 0)
+    min_str = ""
+    forge_dep_re = re.compile(r'modId\s*=\s*"forge".*?versionRange\s*=\s*"\[([0-9.]+),', re.S)
+    for jar_path in mods_dir.glob("*.jar"):
+        try:
+            with zipfile.ZipFile(str(jar_path), "r") as z:
+                if "META-INF/mods.toml" in z.namelist():
+                    content = z.read("META-INF/mods.toml").decode(errors="ignore")
+                    for m in forge_dep_re.finditer(content):
+                        ver_str = m.group(1)
+                        try:
+                            ver_t = tuple(int(x) for x in ver_str.split("."))
+                            if ver_t > min_ver:
+                                min_ver = ver_t
+                                min_str = ver_str
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    return min_str
+
 
 def fix_mods_at_root(install_dir: Path, java_path: str, mc_version: str) -> Path | None:
     """
@@ -771,7 +833,12 @@ def fix_mods_at_root(install_dir: Path, java_path: str, mc_version: str) -> Path
             shutil.move(str(jar), str(dest))
     ok(f"Moved {len(root_jars)} mod jars into mods/")
 
-    forge_version = fetch_forge_version(mc_version)
+    # Scan mods for their minimum Forge version requirement
+    min_forge = _detect_min_forge_from_mods(mods_dir)
+    if min_forge:
+        info(f"Mods require Forge >= {min_forge}")
+
+    forge_version = fetch_forge_version(mc_version, min_forge)
     if not forge_version:
         warn(f"Could not find Forge version for MC {mc_version} — skipping Forge install.")
         return None
