@@ -1,5 +1,5 @@
 """
-Minecraft Server Installer  v1.3
+Minecraft Server Installer  v1.4
 Supports: Modpack (CurseForge), Vanilla, Paper (plugins), Fabric (mods)
 Mod sources: Modrinth slugs, Modrinth URLs, CurseForge URLs, modlist.txt file
 """
@@ -1023,6 +1023,80 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
     sys.exit(1)
 
 
+# ── KubeJS local client sync ─────────────────────────────────────────────────
+def _find_local_kubejs(mod_name: str, slug: str) -> Path | None:
+    """
+    Search common modpack launcher instance directories for a client install of
+    this modpack. Returns the kubejs/ subdirectory if found, else None.
+    """
+    appdata      = Path(os.environ.get("APPDATA", ""))
+    localappdata = Path(os.environ.get("LOCALAPPDATA", ""))
+    search_roots = [
+        Path.home() / "curseforge" / "minecraft" / "Instances",
+        appdata / "PrismLauncher" / "instances",
+        appdata / "ATLauncher" / "instances",
+        appdata / "MultiMC" / "instances",
+        localappdata / "Overwolf" / "CurseForge" / "Instances",
+    ]
+
+    slug_name = slug.replace("-", " ")
+
+    def name_matches(folder_name: str) -> bool:
+        fn = folder_name.lower()
+        return (fn == mod_name.lower()
+                or fn == slug_name.lower()
+                or slug.lower() in fn
+                or fn.replace(" ", "-") == slug.lower())
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        try:
+            for instance_dir in root.iterdir():
+                if not instance_dir.is_dir():
+                    continue
+                if name_matches(instance_dir.name):
+                    kubejs = instance_dir / "kubejs"
+                    if kubejs.exists():
+                        return kubejs
+        except PermissionError:
+            pass
+    return None
+
+
+def copy_local_kubejs(install_dir: Path, mod_name: str, slug: str):
+    """
+    If a local client install of this modpack is found, copy its server-side
+    KubeJS directories (data/, server_scripts/, startup_scripts/) into the
+    server's kubejs/ folder. Skips client_scripts/ and assets/ (client-only).
+    """
+    kubejs_src = _find_local_kubejs(mod_name, slug)
+    if not kubejs_src:
+        info("No local client install found — KubeJS scripts not synced.")
+        info("  (If you have the modpack installed via CurseForge/Prism, run the")
+        info("   installer again from the same PC to auto-copy the scripts.)")
+        return
+
+    ok(f"Found local client install: {kubejs_src.parent.name}")
+    info("Copying server-side KubeJS scripts...")
+
+    server_kubejs = install_dir / "kubejs"
+    server_kubejs.mkdir(exist_ok=True)
+
+    # Only copy dirs that are meaningful on a server
+    for dir_name in ("data", "server_scripts", "startup_scripts"):
+        src = kubejs_src / dir_name
+        dst = server_kubejs / dir_name
+        if not src.exists():
+            continue
+        if dst.exists():
+            shutil.rmtree(str(dst))
+        shutil.copytree(str(src), str(dst))
+        ok(f"  kubejs/{dir_name}/ synced.")
+
+    ok("KubeJS scripts synced — server behaviour will match singleplayer.")
+
+
 # ── Gonger Certified banner ───────────────────────────────────────────────────
 def print_gonger_banner():
     y  = lambda t: "\033[93m" + t + "\033[0m"
@@ -1047,7 +1121,7 @@ def main():
   ██║╚██╔╝██║██║██║╚██╗██║██╔══╝  ██║     ██╔══██╗██╔══██║██╔══╝     ██║
   ██║ ╚═╝ ██║██║██║ ╚████║███████╗╚██████╗██║  ██║██║  ██║██║        ██║
   ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝        ╚═╝
-  SERVER INSTALLER  v1.3
+  SERVER INSTALLER  v1.4
 """, "green"))
     print_gonger_banner()
 
@@ -1369,6 +1443,10 @@ def main():
                 save_install_meta(install_dir, parse_modpack_slug(raw_url),
                                   modpack_name, ref_file.get("id", 0),
                                   ref_file.get("fileDate", ""))
+
+        # Sync server-side KubeJS scripts from local client install if present
+        header("Syncing KubeJS Scripts")
+        copy_local_kubejs(install_dir, modpack_name, parse_modpack_slug(raw_url))
 
     elif server_type == "vanilla":
         info("Fetching vanilla server URL...")
