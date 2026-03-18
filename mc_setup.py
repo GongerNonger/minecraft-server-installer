@@ -1,5 +1,5 @@
 """
-Minecraft Server Installer  v1.4
+Minecraft Server Installer  v1.5
 Supports: Modpack (CurseForge), Vanilla, Paper (plugins), Fabric (mods)
 Mod sources: Modrinth slugs, Modrinth URLs, CurseForge URLs, modlist.txt file
 """
@@ -1023,11 +1023,11 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
     sys.exit(1)
 
 
-# ── KubeJS local client sync ─────────────────────────────────────────────────
-def _find_local_kubejs(mod_name: str, slug: str) -> Path | None:
+# ── Local client data sync ────────────────────────────────────────────────────
+def _find_local_instance(mod_name: str, slug: str) -> Path | None:
     """
     Search common modpack launcher instance directories for a client install of
-    this modpack. Returns the kubejs/ subdirectory if found, else None.
+    this modpack. Returns the instance root directory if found, else None.
     """
     appdata      = Path(os.environ.get("APPDATA", ""))
     localappdata = Path(os.environ.get("LOCALAPPDATA", ""))
@@ -1056,45 +1056,68 @@ def _find_local_kubejs(mod_name: str, slug: str) -> Path | None:
                 if not instance_dir.is_dir():
                     continue
                 if name_matches(instance_dir.name):
-                    kubejs = instance_dir / "kubejs"
-                    if kubejs.exists():
-                        return kubejs
+                    return instance_dir
         except PermissionError:
             pass
     return None
 
 
-def copy_local_kubejs(install_dir: Path, mod_name: str, slug: str):
+def copy_local_server_data(install_dir: Path, mod_name: str, slug: str):
     """
-    If a local client install of this modpack is found, copy its server-side
-    KubeJS directories (data/, server_scripts/, startup_scripts/) into the
-    server's kubejs/ folder. Skips client_scripts/ and assets/ (client-only).
+    If a local client install of this modpack is found, copy all server-relevant
+    data to the server directory:
+      - kubejs/data/, kubejs/server_scripts/, kubejs/startup_scripts/
+      - config/ftbquests/
+      - defaultconfigs/ subdirectories missing from the server
     """
-    kubejs_src = _find_local_kubejs(mod_name, slug)
-    if not kubejs_src:
-        info("No local client install found — KubeJS scripts not synced.")
-        info("  (If you have the modpack installed via CurseForge/Prism, run the")
-        info("   installer again from the same PC to auto-copy the scripts.)")
+    instance = _find_local_instance(mod_name, slug)
+    if not instance:
+        info("No local client install found — server scripts not synced.")
+        info("  (Install the modpack via CurseForge/Prism on this PC first,")
+        info("   then re-run the installer to auto-copy everything.)")
         return
 
-    ok(f"Found local client install: {kubejs_src.parent.name}")
-    info("Copying server-side KubeJS scripts...")
+    ok(f"Found local client install: {instance.name}")
 
-    server_kubejs = install_dir / "kubejs"
-    server_kubejs.mkdir(exist_ok=True)
+    # ── KubeJS (server-side dirs only) ───────────────────────────────────────
+    kubejs_src = instance / "kubejs"
+    if kubejs_src.exists():
+        server_kubejs = install_dir / "kubejs"
+        server_kubejs.mkdir(exist_ok=True)
+        for dir_name in ("data", "server_scripts", "startup_scripts"):
+            src = kubejs_src / dir_name
+            dst = server_kubejs / dir_name
+            if not src.exists():
+                continue
+            if dst.exists():
+                shutil.rmtree(str(dst))
+            shutil.copytree(str(src), str(dst))
+            ok(f"  kubejs/{dir_name}/ synced.")
 
-    # Only copy dirs that are meaningful on a server
-    for dir_name in ("data", "server_scripts", "startup_scripts"):
-        src = kubejs_src / dir_name
-        dst = server_kubejs / dir_name
-        if not src.exists():
-            continue
-        if dst.exists():
-            shutil.rmtree(str(dst))
-        shutil.copytree(str(src), str(dst))
-        ok(f"  kubejs/{dir_name}/ synced.")
+    # ── config/ftbquests (quest definitions) ─────────────────────────────────
+    ftbq_src = instance / "config" / "ftbquests"
+    ftbq_dst = install_dir / "config" / "ftbquests"
+    if ftbq_src.exists():
+        if ftbq_dst.exists():
+            shutil.rmtree(str(ftbq_dst))
+        shutil.copytree(str(ftbq_src), str(ftbq_dst))
+        ok("  config/ftbquests/ synced (quest data).")
 
-    ok("KubeJS scripts synced — server behaviour will match singleplayer.")
+    # ── defaultconfigs (copy subdirs missing from server) ────────────────────
+    dc_src = instance / "defaultconfigs"
+    dc_dst = install_dir / "defaultconfigs"
+    if dc_src.exists():
+        dc_dst.mkdir(exist_ok=True)
+        for item in dc_src.iterdir():
+            dst_item = dc_dst / item.name
+            if not dst_item.exists():
+                if item.is_dir():
+                    shutil.copytree(str(item), str(dst_item))
+                else:
+                    shutil.copy2(str(item), str(dst_item))
+                ok(f"  defaultconfigs/{item.name} synced.")
+
+    ok("Server data synced — behaviour will match singleplayer.")
 
 
 # ── Gonger Certified banner ───────────────────────────────────────────────────
@@ -1121,7 +1144,7 @@ def main():
   ██║╚██╔╝██║██║██║╚██╗██║██╔══╝  ██║     ██╔══██╗██╔══██║██╔══╝     ██║
   ██║ ╚═╝ ██║██║██║ ╚████║███████╗╚██████╗██║  ██║██║  ██║██║        ██║
   ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝        ╚═╝
-  SERVER INSTALLER  v1.4
+  SERVER INSTALLER  v1.5
 """, "green"))
     print_gonger_banner()
 
@@ -1444,9 +1467,9 @@ def main():
                                   modpack_name, ref_file.get("id", 0),
                                   ref_file.get("fileDate", ""))
 
-        # Sync server-side KubeJS scripts from local client install if present
-        header("Syncing KubeJS Scripts")
-        copy_local_kubejs(install_dir, modpack_name, parse_modpack_slug(raw_url))
+        # Sync server-side data from local client install if present
+        header("Syncing Server Data from Client Install")
+        copy_local_server_data(install_dir, modpack_name, parse_modpack_slug(raw_url))
 
     elif server_type == "vanilla":
         info("Fetching vanilla server URL...")
