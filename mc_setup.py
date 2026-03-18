@@ -714,6 +714,72 @@ def check_existing_modpack(install_dir: Path, slug: str, files: list) -> bool:
     warn("This directory already has a modpack installation.")
     return not ask_yn("Re-install / overwrite?", "n")
 
+def fetch_forge_version(mc_version: str) -> str:
+    """Return the recommended (or latest) Forge version for a given MC version."""
+    try:
+        data = _get_json("https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json")
+        promos = data.get("promos", {})
+        return (promos.get(f"{mc_version}-recommended")
+                or promos.get(f"{mc_version}-latest")
+                or "")
+    except Exception:
+        return ""
+
+def download_and_run_forge(java_path: str, install_dir: Path, mc_version: str, forge_version: str) -> Path:
+    """Download Forge installer, run --installServer, return win_args.txt path."""
+    installer_url = (
+        f"https://maven.minecraftforge.net/net/minecraftforge/forge/"
+        f"{mc_version}-{forge_version}/"
+        f"forge-{mc_version}-{forge_version}-installer.jar"
+    )
+    installer_jar = install_dir / f"forge-{mc_version}-{forge_version}-installer.jar"
+    download(installer_url, str(installer_jar), f"Forge {forge_version} installer")
+    win_args = run_forge_installer(java_path, install_dir, installer_jar)
+    installer_jar.unlink(missing_ok=True)
+    return win_args
+
+def fix_mods_at_root(install_dir: Path, java_path: str, mc_version: str) -> Path | None:
+    """
+    Some server packs dump all mod jars directly into the root folder with no
+    Forge installation. Detect this, move jars to mods/, install Forge, and
+    return the win_args.txt path. Returns None if this situation is not detected.
+    """
+    # Conditions: no libraries/ folder (Forge not installed), no win_args.txt,
+    # but there ARE jar files at the root that look like mods (not launchers).
+    if (install_dir / "libraries").exists():
+        return None
+    if list(install_dir.rglob("win_args.txt")):
+        return None
+
+    root_jars = [p for p in install_dir.glob("*.jar")
+                 if "installer" not in p.name.lower()]
+    if not root_jars:
+        return None
+
+    # If any root jar looks like a real server launcher, don't interfere
+    launcher_keywords = ("server", "forge", "minecraft", "launch", "fabric")
+    if any(any(kw in j.name.lower() for kw in launcher_keywords) for j in root_jars):
+        return None
+
+    warn("Server pack has mods at root with no Forge install — fixing automatically...")
+
+    mods_dir = install_dir / "mods"
+    mods_dir.mkdir(exist_ok=True)
+    for jar in root_jars:
+        dest = mods_dir / jar.name
+        if not dest.exists():
+            shutil.move(str(jar), str(dest))
+    ok(f"Moved {len(root_jars)} mod jars into mods/")
+
+    forge_version = fetch_forge_version(mc_version)
+    if not forge_version:
+        warn(f"Could not find Forge version for MC {mc_version} — skipping Forge install.")
+        return None
+
+    info(f"Installing Forge {mc_version}-{forge_version}...")
+    return download_and_run_forge(java_path, install_dir, mc_version, forge_version)
+
+
 def run_forge_installer(java_path: str, install_dir: Path, installer_jar: Path) -> Path:
     """Run the Forge --installServer and return the path to win_args.txt."""
     info("Running Forge installer (this may take a minute)...")
@@ -729,7 +795,7 @@ def run_forge_installer(java_path: str, install_dir: Path, installer_jar: Path) 
     return win_args_list[0]
 
 def install_modpack_server(mod_info: dict, files: list, api_key: str,
-                           install_dir: Path, java_path: str):
+                           install_dir: Path, java_path: str, mc_version: str = "1.20.1"):
     """
     Download and set up the modpack server.
     Returns ("forge", win_args_path) or ("jar", jar_name).
@@ -858,6 +924,11 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
                     return ("forge", win_args_path)
         except Exception:
             pass
+
+    # ── Mods dumped at root with no Forge install (common bad server pack) ──────
+    fixed = fix_mods_at_root(install_dir, java_path, mc_version)
+    if fixed:
+        return ("forge", fixed)
 
     # ── Fallback: named server jars only ─────────────────────────────────────
     for candidate in ["server.jar", "minecraft_server.jar", "forge-server.jar"]:
@@ -1220,7 +1291,7 @@ def main():
             # ── Modpack install ───────────────────────────────────────────────
             header(f"Downloading {modpack_name}")
             start_mode, result = install_modpack_server(
-                mod_info, files, cf_api_key, install_dir, java_path)
+                mod_info, files, cf_api_key, install_dir, java_path, mc_version)
             if start_mode == "forge":
                 win_args = result
             else:
