@@ -1,5 +1,5 @@
 """
-Minecraft Server Installer  v1.7
+Minecraft Server Installer  v1.8
 Supports: Modpack (CurseForge), Vanilla, Paper (plugins), Fabric (mods)
 Mod sources: Modrinth slugs, Modrinth URLs, CurseForge URLs, modlist.txt file
 """
@@ -1125,6 +1125,61 @@ def copy_local_server_data(install_dir: Path, mod_name: str, slug: str):
                 ok(f"  defaultconfigs/{item.name} synced.")
 
     ok("Server data synced — behaviour will match singleplayer.")
+
+    # Apply pack-specific server-side patches
+    apply_modpack_patches(install_dir, slug)
+
+
+def apply_modpack_patches(install_dir: Path, slug: str):
+    """
+    Apply known server-side fixes that differ from the client kubejs files.
+    Each patch is idempotent — safe to re-run.
+    """
+
+    # ── Liminal Industries: lighting fix ─────────────────────────────────────
+    # On a dedicated server, ceilling_lamp blocks placed via `place template`
+    # don't trigger a light engine update.  The pack has a lightcaster_step
+    # function that fills rooms with persistent minecraft:light blocks, but it
+    # was never wired to tick.json and light markers were never spawned during
+    # room generation.  The three patches below fix that.
+    if slug in ("liminal-industries",):
+        fns_dir = install_dir / "kubejs" / "data" / "backrooms" / "functions"
+        tick_path = install_dir / "kubejs" / "data" / "minecraft" / "tags" / "functions" / "tick.json"
+
+        # 1. room_node_generation.mcfunction — spawn a light marker per command block
+        rng_path = fns_dir / "room_node_generation.mcfunction"
+        if rng_path.exists():
+            text = rng_path.read_text()
+            light_line = "execute if score generation generation matches 1 run summon marker ~ ~1 ~ {Tags:[\"light\"]}"
+            if light_line not in text:
+                text = text.replace(
+                    "execute if score generation generation matches 1 run setblock ~ ~ ~ air",
+                    light_line + "\nexecute if score generation generation matches 1 run setblock ~ ~ ~ air"
+                )
+                rng_path.write_text(text)
+                ok("  [liminal-industries] Patched room_node_generation.mcfunction (lighting fix).")
+
+        # 2. starting_room_new.mcfunction — safety light marker at player spawn
+        srn_path = fns_dir / "starting_room_new.mcfunction"
+        if srn_path.exists():
+            text = srn_path.read_text()
+            srn_light = "execute unless score first_gen first_gen matches 1 run summon marker ~ ~1 ~ {Tags:[\"light\"]}"
+            if srn_light not in text:
+                text = text.replace(
+                    "scoreboard players set first_gen first_gen 1",
+                    srn_light + "\nscoreboard players set first_gen first_gen 1"
+                )
+                srn_path.write_text(text)
+                ok("  [liminal-industries] Patched starting_room_new.mcfunction (lighting fix).")
+
+        # 3. tick.json — register lightcaster_step so light markers actually move
+        if tick_path.exists():
+            import json as _json
+            tick = _json.loads(tick_path.read_text())
+            if "backrooms:lightcaster_step" not in tick.get("values", []):
+                tick["values"].append("backrooms:lightcaster_step")
+                tick_path.write_text(_json.dumps(tick, indent=4))
+                ok("  [liminal-industries] Patched tick.json (lightcaster_step registered).")
 
 
 # ── Gonger Certified banner ───────────────────────────────────────────────────
