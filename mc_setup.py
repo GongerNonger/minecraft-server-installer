@@ -14,6 +14,7 @@ import zipfile
 import subprocess
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 # Disable SSL verification — certificates are not bundled in the exe and all
@@ -637,6 +638,14 @@ def _cf_req(url: str, api_key: str):
     req = urllib.request.Request(url, headers=headers)
     return json.loads(urllib.request.urlopen(req, context=_SSL_CTX).read())
 
+def cf_cdn_url(file_id, file_name: str) -> str:
+    # Why: CurseForge returns downloadUrl=null when the author disables
+    # third-party distribution, but the CDN still serves the file at a
+    # deterministic path derived from the numeric file ID.
+    fid = int(file_id)
+    return (f"https://edge.forgecdn.net/files/"
+            f"{fid // 1000}/{fid % 1000}/{urllib.parse.quote(file_name)}")
+
 def fetch_modpack_info(slug: str, api_key: str) -> dict:
     """Return the CurseForge mod object for this modpack slug, or None."""
     url = (f"https://api.curseforge.com/v1/mods/search"
@@ -882,11 +891,12 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
     server_file = find_server_pack(files)
     used_server_pack = False
 
-    if server_file and server_file.get("downloadUrl"):
+    if server_file:
+        sf_url = server_file.get("downloadUrl") or cf_cdn_url(
+            server_file["id"], server_file["fileName"])
         info(f"Found server pack: {server_file['displayName']}")
         zip_path = install_dir / "_server_pack.zip"
-        download(server_file["downloadUrl"], str(zip_path),
-                 "server pack", extra_headers=cf_headers)
+        download(sf_url, str(zip_path), "server pack", extra_headers=cf_headers)
         info("Extracting server pack...")
         with zipfile.ZipFile(str(zip_path), "r") as z:
             z.extractall(str(install_dir))
@@ -894,20 +904,18 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
         ok("Server pack extracted.")
         used_server_pack = True
     else:
-        if server_file:
-            warn("Server pack has no direct download URL — falling back to manifest.")
-        else:
-            info("No dedicated server pack found — using manifest to download mods.")
+        info("No dedicated server pack found — using manifest to download mods.")
 
         # ── Manifest fallback: download client zip, extract mods ──────────────
         client_file = find_client_pack(files)
-        if not client_file or not client_file.get("downloadUrl"):
+        if not client_file:
             err("Could not find a downloadable modpack file.")
             sys.exit(1)
 
+        cf_url = client_file.get("downloadUrl") or cf_cdn_url(
+            client_file["id"], client_file["fileName"])
         zip_path = install_dir / "_client_pack.zip"
-        download(client_file["downloadUrl"], str(zip_path),
-                 "modpack", extra_headers=cf_headers)
+        download(cf_url, str(zip_path), "modpack", extra_headers=cf_headers)
 
         with zipfile.ZipFile(str(zip_path), "r") as z:
             if "manifest.json" not in z.namelist():
@@ -930,17 +938,14 @@ def install_modpack_server(mod_info: dict, files: list, api_key: str,
                     f"https://api.curseforge.com/v1/mods/{proj_id}/files/{file_id}",
                     api_key)
                 finfo = fdata.get("data", {})
-                dl_url = finfo.get("downloadUrl")
                 fname  = finfo.get("fileName", f"mod_{proj_id}.jar")
-                if dl_url:
-                    req = urllib.request.Request(
-                        dl_url,
-                        headers={"User-Agent": "mc-installer/1.2", "x-api-key": api_key})
-                    with urllib.request.urlopen(req, context=_SSL_CTX) as r, \
-                            open(str(mods_dir / fname), "wb") as fh:
-                        fh.write(r.read())
-                else:
-                    fail += 1
+                dl_url = finfo.get("downloadUrl") or cf_cdn_url(file_id, fname)
+                req = urllib.request.Request(
+                    dl_url,
+                    headers={"User-Agent": "mc-installer/1.2", "x-api-key": api_key})
+                with urllib.request.urlopen(req, context=_SSL_CTX) as r, \
+                        open(str(mods_dir / fname), "wb") as fh:
+                    fh.write(r.read())
             except Exception:
                 fail += 1
         print()
